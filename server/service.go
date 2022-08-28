@@ -44,6 +44,7 @@ type BoostServiceOpts struct {
 	GenesisForkVersionHex string
 	RelayRequestTimeout   time.Duration
 	RelayCheck            bool
+	RelayMinBid			  types.U256Str
 }
 
 // BoostService - the mev-boost service
@@ -53,6 +54,7 @@ type BoostService struct {
 	log        *logrus.Entry
 	srv        *http.Server
 	relayCheck bool
+	relayMinBid types.U256Str
 
 	builderSigningDomain types.Domain
 	httpClient           http.Client
@@ -73,11 +75,12 @@ func NewBoostService(opts BoostServiceOpts) (*BoostService, error) {
 	}
 
 	return &BoostService{
-		listenAddr: opts.ListenAddr,
-		relays:     opts.Relays,
-		log:        opts.Log.WithField("module", "service"),
-		relayCheck: opts.RelayCheck,
-		bids:       make(map[bidRespKey]bidResp),
+		listenAddr:  opts.ListenAddr,
+		relays:      opts.Relays,
+		log:         opts.Log.WithField("module", "service"),
+		relayCheck:  opts.RelayCheck,
+		relayMinBid: opts.RelayMinBid,
+		bids:        make(map[bidRespKey]bidResp),
 
 		builderSigningDomain: builderSigningDomain,
 		httpClient: http.Client{
@@ -129,7 +132,7 @@ func (m *BoostService) StartHTTPServer() error {
 	}
 
 	go m.startBidCacheCleanupTask()
-
+	
 	m.srv = &http.Server{
 		Addr:    m.listenAddr,
 		Handler: m.getRouter(),
@@ -367,6 +370,11 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 				relays[blockHash] = []string{relay.String()}
 			} else {
 				relays[blockHash] = append(relays[blockHash], relay.String())
+			}
+
+			// Skip if value (fee) is not greater than minimum bid
+			if responsePayload.Data.Message.Value.Cmp(&m.relayMinBid) < 1 {
+				return
 			}
 
 			// Skip if value (fee) is not greater than the current highest value
