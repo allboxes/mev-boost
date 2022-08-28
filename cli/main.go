@@ -3,11 +3,13 @@ package cli
 import (
 	"flag"
 	"fmt"
+	"math/big"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/flashbots/go-boost-utils/types"
 	"github.com/flashbots/mev-boost/config"
 	"github.com/flashbots/mev-boost/server"
 	"github.com/sirupsen/logrus"
@@ -29,6 +31,7 @@ var (
 	defaultRelayTimeoutMs     = getEnvInt("RELAY_TIMEOUT_MS", 2000) // timeout for all the requests to the relay
 	defaultRelayCheck         = os.Getenv("RELAY_STARTUP_CHECK") != ""
 	defaultGenesisForkVersion = getEnv("GENESIS_FORK_VERSION", "")
+	defaultRelayMinBidEth 	  = getEnvFloat64("RELAY_MIN_BID", 0.001)
 
 	// cli flags
 	printVersion = flag.Bool("version", false, "only print version")
@@ -39,7 +42,7 @@ var (
 	relayURLs      = flag.String("relays", "", "relay urls - single entry or comma-separated list (scheme://pubkey@host)")
 	relayTimeoutMs = flag.Int("request-timeout", defaultRelayTimeoutMs, "timeout for requests to a relay [ms]")
 	relayCheck     = flag.Bool("relay-check", defaultRelayCheck, "check relay status on startup and on the status API call")
-
+	relayMinBidEth = flag.Float64("min-bid", defaultRelayMinBidEth, "minimum bid to accept from a relay [eth]")
 	// helpers
 	useGenesisForkVersionMainnet = flag.Bool("mainnet", false, "use Mainnet")
 	useGenesisForkVersionKiln    = flag.Bool("kiln", false, "use Kiln")
@@ -112,6 +115,17 @@ func Main() {
 		log.Fatal("Please specify a relay timeout greater than 0")
 	}
 
+
+	if *relayMinBidEth < 0.0 {
+		log.Fatal("Please specify a non-negative minimum bid")
+	}
+
+	if *relayMinBidEth > 100.0 {
+		log.Fatal("Please specify a min bid less than 100 eth")
+	}
+
+	relayMinBidWei := floatEthTo256Wei(*relayMinBidEth)
+
 	opts := server.BoostServiceOpts{
 		Log:                   log,
 		ListenAddr:            *listenAddr,
@@ -119,6 +133,7 @@ func Main() {
 		GenesisForkVersionHex: genesisForkVersionHex,
 		RelayRequestTimeout:   relayTimeout,
 		RelayCheck:            *relayCheck,
+		RelayMinBid:		   *relayMinBidWei,
 	}
 	server, err := server.NewBoostService(opts)
 	if err != nil {
@@ -150,6 +165,16 @@ func getEnvInt(key string, defaultValue int) int {
 	return defaultValue
 }
 
+func getEnvFloat64(key string, defaultValue float64) float64 {
+	if value, ok := os.LookupEnv(key); ok {
+		val, err := strconv.ParseFloat(value, 64)
+		if err == nil {
+			return val
+		}
+	}
+	return defaultValue
+}
+
 func parseRelayURLs(relayURLs string) []server.RelayEntry {
 	ret := []server.RelayEntry{}
 	for _, entry := range strings.Split(relayURLs, ",") {
@@ -160,4 +185,22 @@ func parseRelayURLs(relayURLs string) []server.RelayEntry {
 		ret = append(ret, relay)
 	}
 	return ret
+}
+
+func floatEthTo256Wei(val float64) *types.U256Str {
+	bigval := new(big.Float)
+	bigval.SetFloat64(val)
+
+	wad := new(big.Float)
+	wad.SetInt(big.NewInt(1000000000000000000))
+
+	bigval.Mul(bigval, wad)
+
+	result := new(big.Int)
+	bigval.Int(result)
+
+	u256 := new(types.U256Str)
+	u256.FromBig(result)
+
+	return u256
 }
