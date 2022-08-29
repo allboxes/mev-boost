@@ -321,21 +321,21 @@ func TestGetHeader(t *testing.T) {
 		// Create backend and register 3 relays.
 		backend := newTestBackend(t, 3, time.Second)
 
-		// First relay will return signed response with value 12345.
+		// First relay will return signed response with value 0.
 		backend.relays[0].GetHeaderResponse = backend.relays[0].MakeGetHeaderResponse(
 			0,
 			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
 			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
 		)
 
-		// First relay will return signed response with value 12347.
+		// First relay will return signed response with value 1.
 		backend.relays[1].GetHeaderResponse = backend.relays[1].MakeGetHeaderResponse(
 			1,
 			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
 			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
 		)
 
-		// First relay will return signed response with value 12346.
+		// First relay will return signed response with value 2.
 		backend.relays[2].GetHeaderResponse = backend.relays[2].MakeGetHeaderResponse(
 			2,
 			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
