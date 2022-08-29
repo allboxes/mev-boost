@@ -372,7 +372,7 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 				relays[blockHash] = append(relays[blockHash], relay.String())
 			}
 
-			// Skip if value (fee) is not greater than minimum bid
+			// Skip if value (fee) is lower than the minimum bid
 			if responsePayload.Data.Message.Value.Cmp(&m.relayMinBid) == -1 {
 				return
 			}
