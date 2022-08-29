@@ -42,7 +42,7 @@ func newTestBackend(t *testing.T, numRelays int, relayTimeout time.Duration) *te
 		GenesisForkVersionHex: "0x00000000",
 		RelayRequestTimeout:   relayTimeout,
 		RelayCheck:            true,
-		RelayMinBid:           types.IntToU256(12344),
+		RelayMinBid:           types.IntToU256(12345),
 	}
 	service, err := NewBoostService(opts)
 	require.NoError(t, err)
@@ -318,26 +318,12 @@ func TestGetHeader(t *testing.T) {
 	})
 
 	t.Run("Respect minimum bid cutoff", func(t *testing.T) {
-		// Create backend and register 3 relays.
-		backend := newTestBackend(t, 3, time.Second)
+		// Create backend and register relay.
+		backend := newTestBackend(t, 1, time.Second)
 
-		// First relay will return signed response with value 0.
+		// Relay will return signed response with value 12344.
 		backend.relays[0].GetHeaderResponse = backend.relays[0].MakeGetHeaderResponse(
-			0,
-			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
-			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
-		)
-
-		// First relay will return signed response with value 1.
-		backend.relays[1].GetHeaderResponse = backend.relays[1].MakeGetHeaderResponse(
-			1,
-			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
-			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
-		)
-
-		// First relay will return signed response with value 2.
-		backend.relays[2].GetHeaderResponse = backend.relays[2].MakeGetHeaderResponse(
-			2,
+			12344,
 			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
 			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
 		)
@@ -347,11 +333,33 @@ func TestGetHeader(t *testing.T) {
 
 		// Each relay must have received the request.
 		require.Equal(t, 1, backend.relays[0].GetRequestCount(path))
-		require.Equal(t, 1, backend.relays[1].GetRequestCount(path))
-		require.Equal(t, 1, backend.relays[2].GetRequestCount(path))
 
-		// Request should have no content
+		// Request should have no content (min bid is 12345)
 		require.Equal(t, http.StatusNoContent, rr.Code)
+	})
+
+	t.Run("Allow bids which meet minimum bid cutoff", func(t *testing.T) {
+		// Create backend and register relay.
+		backend := newTestBackend(t, 1, time.Second)
+
+		// First relay will return signed response with value 12345.
+		backend.relays[0].GetHeaderResponse = backend.relays[0].MakeGetHeaderResponse(
+			12345,
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		// Run the request.
+		rr := backend.request(t, http.MethodGet, path, nil)
+
+		// Each relay must have received the request.
+		require.Equal(t, 1, backend.relays[0].GetRequestCount(path))
+
+		// Value should be 12345 (min bid is 12345)
+		resp := new(types.GetHeaderResponse)
+		err := json.Unmarshal(rr.Body.Bytes(), resp)
+		require.NoError(t, err)
+		require.Equal(t, types.IntToU256(12345), resp.Data.Message.Value)
 	})
 
 
