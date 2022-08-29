@@ -50,10 +50,10 @@ type BoostServiceOpts struct {
 // BoostService - the mev-boost service
 type BoostService struct {
 	listenAddr string
-	relays     []RelayEntry
-	log        *logrus.Entry
-	srv        *http.Server
-	relayCheck bool
+	relays      []RelayEntry
+	log         *logrus.Entry
+	srv         *http.Server
+	relayCheck  bool
 	relayMinBid types.U256Str
 
 	builderSigningDomain types.Domain
@@ -373,7 +373,7 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 			}
 
 			// Skip if value (fee) is not greater than minimum bid
-			if responsePayload.Data.Message.Value.Cmp(&m.relayMinBid) < 1 {
+			if responsePayload.Data.Message.Value.Cmp(&m.relayMinBid) == -1 {
 				return
 			}
 
