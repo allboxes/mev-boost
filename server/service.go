@@ -375,6 +375,19 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 			// Skip if value (fee) is lower than the minimum bid
 			if responsePayload.Data.Message.Value.Cmp(&m.relayMinBid) == -1 {
 				return
+      }
+
+			// Compare the bid with already known top bid (if any)
+			if result.response.Data != nil {
+				valueDiff := responsePayload.Data.Message.Value.Cmp(&result.response.Data.Message.Value)
+				if valueDiff == -1 { // current bid is less profitable than already known one
+					return
+				} else if valueDiff == 0 { // current bid is equally profitable as already known one. Use hash as tiebreaker
+					previousBidBlockHash := result.response.Data.Message.Header.BlockHash.String()
+					if blockHash >= previousBidBlockHash {
+						return
+					}
+				}
 			}
 
 			// Compare the bid with already known top bid (if any)

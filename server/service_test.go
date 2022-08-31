@@ -403,7 +403,6 @@ func TestGetHeader(t *testing.T) {
 		require.Equal(t, types.IntToU256(12345), resp.Data.Message.Value)
 	})
 
-
 	t.Run("Invalid relay public key", func(t *testing.T) {
 		backend := newTestBackend(t, 1, time.Second)
 
