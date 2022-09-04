@@ -120,8 +120,8 @@ func Main() {
 		log.Fatal("Please specify a non-negative minimum bid")
 	}
 
-	if *relayMinBidEth > 100.0 {
-		log.Fatal("Please specify a min bid less than 100 eth")
+	if *relayMinBidEth > 1000000.0 {
+		log.Fatal("Minimum bid is too large, please ensure min-bid is denominated in Ethers")
 	}
 
 	relayMinBidWei := floatEthTo256Wei(*relayMinBidEth)
