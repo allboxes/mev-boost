@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,23 +42,30 @@ type BoostServiceOpts struct {
 	Log                   *logrus.Entry
 	ListenAddr            string
 	Relays                []RelayEntry
+	RelayMonitors         []*url.URL
 	GenesisForkVersionHex string
-	RelayRequestTimeout   time.Duration
 	RelayCheck            bool
 	RelayMinBid			  types.U256Str
+
+	RequestTimeoutGetHeader  time.Duration
+	RequestTimeoutGetPayload time.Duration
+	RequestTimeoutRegVal     time.Duration
 }
 
 // BoostService - the mev-boost service
 type BoostService struct {
-	listenAddr string
-	relays      []RelayEntry
-	log         *logrus.Entry
-	srv         *http.Server
-	relayCheck  bool
-	relayMinBid types.U256Str
+	listenAddr    string
+	relays        []RelayEntry
+	relayMonitors []*url.URL
+	log           *logrus.Entry
+	srv           *http.Server
+	relayCheck    bool
+  relayMinBid types.U256Str
 
 	builderSigningDomain types.Domain
-	httpClient           http.Client
+	httpClientGetHeader  http.Client
+	httpClientGetPayload http.Client
+	httpClientRegVal     http.Client
 
 	bidsLock sync.Mutex
 	bids     map[bidRespKey]bidResp // keeping track of bids, to log the originating relay on withholding
@@ -75,19 +83,26 @@ func NewBoostService(opts BoostServiceOpts) (*BoostService, error) {
 	}
 
 	return &BoostService{
-		listenAddr:  opts.ListenAddr,
-		relays:      opts.Relays,
-		log:         opts.Log.WithField("module", "service"),
-		relayCheck:  opts.RelayCheck,
-		relayMinBid: opts.RelayMinBid,
-		bids:        make(map[bidRespKey]bidResp),
+		listenAddr:    opts.ListenAddr,
+		relays:        opts.Relays,
+		relayMonitors: opts.RelayMonitors,
+		log:           opts.Log.WithField("module", "service"),
+		relayCheck:    opts.RelayCheck,
+    relayMinBid:   opts.RelayMinBid,
+		bids:          make(map[bidRespKey]bidResp),
 
 		builderSigningDomain: builderSigningDomain,
-		httpClient: http.Client{
-			Timeout: opts.RelayRequestTimeout,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
+		httpClientGetHeader: http.Client{
+			Timeout:       opts.RequestTimeoutGetHeader,
+			CheckRedirect: httpClientDisallowRedirects,
+		},
+		httpClientGetPayload: http.Client{
+			Timeout:       opts.RequestTimeoutGetPayload,
+			CheckRedirect: httpClientDisallowRedirects,
+		},
+		httpClientRegVal: http.Client{
+			Timeout:       opts.RequestTimeoutRegVal,
+			CheckRedirect: httpClientDisallowRedirects,
 		},
 	}, nil
 }
@@ -165,6 +180,22 @@ func (m *BoostService) startBidCacheCleanupTask() {
 	}
 }
 
+func (m *BoostService) sendValidatorRegistrationsToRelayMonitors(payload []types.SignedValidatorRegistration) {
+	log := m.log.WithField("method", "sendValidatorRegistrationsToRelayMonitors").WithField("numRegistrations", len(payload))
+	for _, relayMonitor := range m.relayMonitors {
+		go func(relayMonitor *url.URL) {
+			url := GetURI(relayMonitor, pathRegisterValidator)
+			log = log.WithField("url", url)
+			_, err := SendHTTPRequest(context.Background(), m.httpClientRegVal, http.MethodPost, url, UserAgent(""), payload, nil)
+			if err != nil {
+				log.WithError(err).Warn("error calling registerValidator on relay monitor")
+				return
+			}
+			log.Debug("sent validator registrations to relay monitor")
+		}(relayMonitor)
+	}
+}
+
 func (m *BoostService) handleRoot(w http.ResponseWriter, req *http.Request) {
 	m.respondOK(w, nilResponse)
 }
@@ -193,7 +224,7 @@ func (m *BoostService) handleStatus(w http.ResponseWriter, req *http.Request) {
 			log := m.log.WithField("url", url)
 			log.Debug("Checking relay status")
 
-			_, err := SendHTTPRequest(ctx, m.httpClient, http.MethodGet, url, ua, nil, nil)
+			_, err := SendHTTPRequest(ctx, m.httpClientGetHeader, http.MethodGet, url, ua, nil, nil)
 			if err != nil && ctx.Err() != context.Canceled {
 				log.WithError(err).Error("failed to retrieve relay status")
 				return
@@ -239,7 +270,7 @@ func (m *BoostService) handleRegisterValidator(w http.ResponseWriter, req *http.
 			url := relay.GetURI(pathRegisterValidator)
 			log := log.WithField("url", url)
 
-			_, err := SendHTTPRequest(context.Background(), m.httpClient, http.MethodPost, url, ua, payload, nil)
+			_, err := SendHTTPRequest(context.Background(), m.httpClientRegVal, http.MethodPost, url, ua, payload, nil)
 			relayRespCh <- err
 			if err != nil {
 				log.WithError(err).Warn("error calling registerValidator on relay")
@@ -247,6 +278,8 @@ func (m *BoostService) handleRegisterValidator(w http.ResponseWriter, req *http.
 			}
 		}(relay)
 	}
+
+	go m.sendValidatorRegistrationsToRelayMonitors(payload)
 
 	for i := 0; i < len(m.relays); i++ {
 		respErr := <-relayRespCh
@@ -305,7 +338,7 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 			url := relay.GetURI(path)
 			log := log.WithField("url", url)
 			responsePayload := new(types.GetHeaderResponse)
-			code, err := SendHTTPRequest(context.Background(), m.httpClient, http.MethodGet, url, ua, nil, responsePayload)
+			code, err := SendHTTPRequest(context.Background(), m.httpClientGetHeader, http.MethodGet, url, ua, nil, responsePayload)
 			if err != nil {
 				log.WithError(err).Warn("error making request to relay")
 				return
@@ -461,7 +494,7 @@ func (m *BoostService) handleGetPayload(w http.ResponseWriter, req *http.Request
 			log.Debug("calling getPayload")
 
 			responsePayload := new(types.GetPayloadResponse)
-			_, err := SendHTTPRequest(requestCtx, m.httpClient, http.MethodPost, url, ua, payload, responsePayload)
+			_, err := SendHTTPRequest(requestCtx, m.httpClientGetPayload, http.MethodPost, url, ua, payload, responsePayload)
 
 			if err != nil {
 				log.WithError(err).Error("error making request to relay")
@@ -519,7 +552,7 @@ func (m *BoostService) CheckRelays() bool {
 		m.log.WithField("relay", relay.String()).Info("Checking relay")
 
 		url := relay.GetURI(pathStatus)
-		_, err := SendHTTPRequest(context.Background(), m.httpClient, http.MethodGet, url, "", nil, nil)
+		_, err := SendHTTPRequest(context.Background(), m.httpClientGetHeader, http.MethodGet, url, "", nil, nil)
 		if err != nil {
 			m.log.WithError(err).WithField("relay", relay.String()).Error("relay check failed")
 			return false
