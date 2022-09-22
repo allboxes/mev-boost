@@ -140,7 +140,10 @@ func Main() {
 		log.Fatal("Minimum bid is too large, please ensure min-bid is denominated in Ethers")
 	}
 
-	relayMinBidWei := floatEthTo256Wei(*relayMinBidEth)
+	relayMinBidWei, err := floatEthTo256Wei(*relayMinBidEth)
+	if err != nil {
+		log.WithError(err).Fatal("failed converting min bid")
+	}
 
 	opts := server.BoostServiceOpts{
 		Log:                      log,
@@ -149,7 +152,7 @@ func Main() {
 		RelayMonitors:            relayMonitors,
 		GenesisForkVersionHex:    genesisForkVersionHex,
 		RelayCheck:               *relayCheck,
-    		RelayMinBid:		  *relayMinBidWei,
+    	RelayMinBid:			  *relayMinBidWei,
 		RequestTimeoutGetHeader:  time.Duration(*relayTimeoutMsGetHeader) * time.Millisecond,
 		RequestTimeoutGetPayload: time.Duration(*relayTimeoutMsGetPayload) * time.Millisecond,
 		RequestTimeoutRegVal:     time.Duration(*relayTimeoutMsRegVal) * time.Millisecond,
@@ -206,7 +209,7 @@ func parseRelayURLs(relayURLs string) []server.RelayEntry {
 	return ret
 }
 
-func floatEthTo256Wei(val float64) *types.U256Str {
+func floatEthTo256Wei(val float64) (*types.U256Str, error) {
 	bigval := new(big.Float)
 	bigval.SetFloat64(val)
 
@@ -219,9 +222,9 @@ func floatEthTo256Wei(val float64) *types.U256Str {
 	bigval.Int(result)
 
 	u256 := new(types.U256Str)
-	u256.FromBig(result)
+	err := u256.FromBig(result)
 
-	return u256
+	return u256, err
 }
 
 func parseRelayMonitorURLs(relayMonitorURLs string) (ret []*url.URL) {

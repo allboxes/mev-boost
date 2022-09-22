@@ -62,7 +62,7 @@ type BoostService struct {
 	log           *logrus.Entry
 	srv           *http.Server
 	relayCheck    bool
-  	relayMinBid types.U256Str
+  	relayMinBid   types.U256Str
 
 	builderSigningDomain types.Domain
 	httpClientGetHeader  http.Client
@@ -90,7 +90,7 @@ func NewBoostService(opts BoostServiceOpts) (*BoostService, error) {
 		relayMonitors: opts.RelayMonitors,
 		log:           opts.Log.WithField("module", "service"),
 		relayCheck:    opts.RelayCheck,
-    		relayMinBid:   opts.RelayMinBid,
+    	relayMinBid:   opts.RelayMinBid,
 		bids:          make(map[bidRespKey]bidResp),
 
 		builderSigningDomain: builderSigningDomain,

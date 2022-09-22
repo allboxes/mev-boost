@@ -42,7 +42,7 @@ func newTestBackend(t *testing.T, numRelays int, relayTimeout time.Duration) *te
 		Relays:                   relayEntries,
 		GenesisForkVersionHex:    "0x00000000",
 		RelayCheck:               true,
-    RelayMinBid:              types.IntToU256(12345),
+    	RelayMinBid:              types.IntToU256(12345),
 		RequestTimeoutGetHeader:  relayTimeout,
 		RequestTimeoutGetPayload: relayTimeout,
 		RequestTimeoutRegVal:     relayTimeout,
