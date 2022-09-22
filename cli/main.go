@@ -42,6 +42,7 @@ var (
 	printVersion = flag.Bool("version", false, "only print version")
 	logJSON      = flag.Bool("json", defaultLogJSON, "log in JSON format instead of text")
 	logLevel     = flag.String("loglevel", defaultLogLevel, "minimum loglevel: trace, debug, info, warn/warning, error, fatal, panic")
+	logDebug     = flag.Bool("debug", false, "shorthand for '-loglevel debug'")
 
 
 	listenAddr       = flag.String("addr", defaultListenAddr, "listen-address for mev-boost server")
@@ -84,16 +85,20 @@ func Main() {
 
 	}
 
+	if *logDebug {
+		*logLevel = "debug"
+	}
 	if *logLevel != "" {
 		lvl, err := logrus.ParseLevel(*logLevel)
 		if err != nil {
 			flag.Usage()
-			log.Fatalf("Invalid loglevel: %s", *logLevel)
+			log.Fatalf("invalid loglevel: %s", *logLevel)
 		}
 		logrus.SetLevel(lvl)
 	}
 
 	log.Infof("mev-boost %s", config.Version)
+	log.Debug("debug logging enabled")
 
 	genesisForkVersionHex := ""
 	if *useCustomGenesisForkVersion != "" {
@@ -110,19 +115,21 @@ func Main() {
 		genesisForkVersionHex = genesisForkVersionGoerli
 	} else {
 		flag.Usage()
-		log.Fatal("Please specify a genesis fork version (eg. -mainnet / -kiln / -ropsten / -sepolia / -goerli / -genesis-fork-version flags)")
+		log.Fatal("please specify a genesis fork version (eg. -mainnet / -sepolia / -goerli / -genesis-fork-version flags)")
 	}
-	log.Infof("Using genesis fork version: %s", genesisForkVersionHex)
+	log.Infof("using genesis fork version: %s", genesisForkVersionHex)
 
 	relays := parseRelayURLs(*relayURLs)
 	if len(relays) == 0 {
 		flag.Usage()
-		log.Fatal("No relays specified")
+		log.Fatal("no relays specified")
 	}
-	log.WithField("relays", relays).Infof("using %d relays", len(relays))
+	log.WithField("relays", relaysToStrings(relays)).Infof("using %d relays", len(relays))
 
 	relayMonitors := parseRelayMonitorURLs(*relayMonitorURLs)
-	log.WithField("relay-monitors", relayMonitors).Infof("using %d relay monitors", len(relayMonitors))
+	if len(relayMonitors) > 0 {
+		log.WithField("relay-monitors", relayMonitors).Infof("using %d relay monitors", len(relayMonitors))
+	}
 
 
 	if *relayMinBidEth < 0.0 {
@@ -152,8 +159,8 @@ func Main() {
 		log.WithError(err).Fatal("failed creating the server")
 	}
 
-	if *relayCheck && !server.CheckRelays() {
-		log.Fatal("no relay available")
+	if *relayCheck && server.CheckRelays() == 0 {
+		log.Error("no relay passed the health-check!")
 	}
 
 	log.Println("listening on", *listenAddr)
@@ -228,6 +235,14 @@ func parseRelayMonitorURLs(relayMonitorURLs string) (ret []*url.URL) {
 			log.WithError(err).WithField("relayMonitorURL", entry).Fatal("Invalid relay monitor URL")
 		}
 		ret = append(ret, relayMonitor)
+	}
+	return ret
+}
+
+func relaysToStrings(relays []server.RelayEntry) []string {
+	ret := []string{}
+	for _, entry := range relays {
+		ret = append(ret, entry.String())
 	}
 	return ret
 }

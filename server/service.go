@@ -1,10 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -203,43 +205,7 @@ func (m *BoostService) handleRoot(w http.ResponseWriter, req *http.Request) {
 // handleStatus sends calls to the status endpoint of every relay.
 // It returns OK if at least one returned OK, and returns error otherwise.
 func (m *BoostService) handleStatus(w http.ResponseWriter, req *http.Request) {
-	if !m.relayCheck {
-		m.respondOK(w, nilResponse)
-		return
-	}
-
-	// If relayCheck is enabled, make sure at least 1 relay returns success
-	var wg sync.WaitGroup
-	var numSuccessRequestsToRelay uint32
-	ua := UserAgent(req.Header.Get("User-Agent"))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	for _, r := range m.relays {
-		wg.Add(1)
-
-		go func(relay RelayEntry) {
-			defer wg.Done()
-			url := relay.GetURI(pathStatus)
-			log := m.log.WithField("url", url)
-			log.Debug("Checking relay status")
-
-			_, err := SendHTTPRequest(ctx, m.httpClientGetHeader, http.MethodGet, url, ua, nil, nil)
-			if err != nil && ctx.Err() != context.Canceled {
-				log.WithError(err).Error("failed to retrieve relay status")
-				return
-			}
-
-			// Success: increase counter and cancel all pending requests to other relays
-			atomic.AddUint32(&numSuccessRequestsToRelay, 1)
-			cancel()
-		}(r)
-	}
-
-	// At the end, wait for every routine and return status according to relay's ones.
-	wg.Wait()
-
-	if numSuccessRequestsToRelay > 0 {
+	if !m.relayCheck || m.CheckRelays() > 0 {
 		m.respondOK(w, nilResponse)
 	} else {
 		m.respondError(w, http.StatusServiceUnavailable, "all relays are unavailable")
@@ -303,6 +269,7 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 		"slot":       slot,
 		"parentHash": parentHashHex,
 		"pubkey":     pubkey,
+		"version":    config.Version,
 	})
 	log.Debug("getHeader")
 
@@ -395,6 +362,8 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 				return
 			}
 
+			log.Debug("bid received")
+
 			mu.Lock()
 			defer mu.Unlock()
 
@@ -424,7 +393,7 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 			}
 
 			// Use this relay's response as mev-boost response because it's most profitable
-			log.Debug("received a good bid")
+			log.Debug("new best bid")
 			result.response = *responsePayload
 			result.blockHash = blockHash
 			result.t = time.Now()
@@ -461,21 +430,51 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 }
 
 func (m *BoostService) handleGetPayload(w http.ResponseWriter, req *http.Request) {
-	log := m.log.WithField("method", "getPayload")
+	log := m.log.WithFields(logrus.Fields{
+		"method":  "getPayload",
+		"version": config.Version,
+	})
+
 	log.Debug("getPayload")
 
+	// Read the body first, so we can log it later on error
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		log.WithError(err).Error("could not read body of request from the beacon node")
+		m.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Decode the body now
 	payload := new(types.SignedBlindedBeaconBlock)
-	if err := DecodeJSON(req.Body, &payload); err != nil {
+	if err := DecodeJSON(bytes.NewReader(body), payload); err != nil {
+		log.WithError(err).WithField("body", string(body)).Error("could not decode request payload from the beacon-node (signed blinded beacon block)")
 		m.respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	if payload.Message == nil || payload.Message.Body == nil || payload.Message.Body.ExecutionPayloadHeader == nil {
+		log.WithField("body", string(body)).Error("missing parts of the request payload from the beacon-node")
 		m.respondError(w, http.StatusBadRequest, "missing parts of the payload")
 		return
 	}
 
-	log = log.WithField("blockHash", payload.Message.Body.ExecutionPayloadHeader.BlockHash.String())
+	log = log.WithFields(logrus.Fields{
+		"slot":       payload.Message.Slot,
+		"blockHash":  payload.Message.Body.ExecutionPayloadHeader.BlockHash.String(),
+		"parentHash": payload.Message.Body.ExecutionPayloadHeader.ParentHash.String(),
+	})
+
+	bidKey := bidRespKey{slot: payload.Message.Slot, blockHash: payload.Message.Body.ExecutionPayloadHeader.BlockHash.String()}
+	m.bidsLock.Lock()
+	originalBid := m.bids[bidKey]
+	m.bidsLock.Unlock()
+	if originalBid.blockHash == "" {
+		log.Error("no bid for this getPayload payload found. was getHeader called before?")
+	} else if len(originalBid.relays) == 0 {
+		log.Warn("bid found but no associated relays")
+	}
+
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	result := new(types.GetPayloadResponse)
@@ -534,11 +533,7 @@ func (m *BoostService) handleGetPayload(w http.ResponseWriter, req *http.Request
 
 	// If no payload has been received from relay, log loudly about withholding!
 	if result.Data == nil || result.Data.BlockHash == nilHash {
-		bidKey := bidRespKey{slot: payload.Message.Slot, blockHash: payload.Message.Body.ExecutionPayloadHeader.BlockHash.String()}
-		m.bidsLock.Lock()
-		originalResp := m.bids[bidKey]
-		m.bidsLock.Unlock()
-		log.WithField("relays", strings.Join(originalResp.relays, ", ")).Errorf("no payload received from relay -- withholding or network error --")
+		log.WithField("relays", strings.Join(originalBid.relays, ", ")).Error("no payload received from relay -- could be a network error or withholding.")
 		m.respondError(w, http.StatusBadGateway, errNoSuccessfulRelayResponse.Error())
 		return
 	}
@@ -547,17 +542,37 @@ func (m *BoostService) handleGetPayload(w http.ResponseWriter, req *http.Request
 }
 
 // CheckRelays sends a request to each one of the relays previously registered to get their status
-func (m *BoostService) CheckRelays() bool {
-	for _, relay := range m.relays {
-		m.log.WithField("relay", relay.String()).Info("Checking relay")
+func (m *BoostService) CheckRelays() int {
+	var wg sync.WaitGroup
+	var numSuccessRequestsToRelay uint32
 
-		url := relay.GetURI(pathStatus)
-		_, err := SendHTTPRequest(context.Background(), m.httpClientGetHeader, http.MethodGet, url, "", nil, nil)
-		if err != nil {
-			m.log.WithError(err).WithField("relay", relay.String()).Error("relay check failed")
-			return false
-		}
+	for _, r := range m.relays {
+		wg.Add(1)
+
+		go func(relay RelayEntry) {
+			defer wg.Done()
+			url := relay.GetURI(pathStatus)
+			log := m.log.WithField("url", url)
+			log.Debug("checking relay status")
+
+			code, err := SendHTTPRequest(context.Background(), m.httpClientGetHeader, http.MethodGet, url, "", nil, nil)
+			if err != nil {
+				log.WithError(err).Error("relay status error - request failed")
+				return
+			}
+			if code == http.StatusOK {
+				log.Debug("relay status OK")
+			} else {
+				log.Errorf("relay status error - unexpected status code %d", code)
+				return
+			}
+
+			// Success: increase counter and cancel all pending requests to other relays
+			atomic.AddUint32(&numSuccessRequestsToRelay, 1)
+		}(r)
 	}
 
-	return true
+	// At the end, wait for every routine and return status according to relay's ones.
+	wg.Wait()
+	return int(numSuccessRequestsToRelay)
 }

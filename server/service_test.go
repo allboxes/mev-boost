@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -147,9 +148,10 @@ var payloadRegisterValidator = types.SignedValidatorRegistration{
 
 func TestStatus(t *testing.T) {
 	t.Run("At least one relay is available", func(t *testing.T) {
-		backend := newTestBackend(t, 2, time.Second)
+		backend := newTestBackend(t, 1, time.Second)
+		time.Sleep(time.Millisecond * 20)
 		path := "/eth/v1/builder/status"
-		rr := backend.request(t, http.MethodGet, path, payloadRegisterValidator)
+		rr := backend.request(t, http.MethodGet, path, nil)
 
 		require.Equal(t, http.StatusOK, rr.Code)
 		require.Equal(t, 1, backend.relays[0].GetRequestCount(path))
@@ -157,12 +159,10 @@ func TestStatus(t *testing.T) {
 
 	t.Run("No relays available", func(t *testing.T) {
 		backend := newTestBackend(t, 1, time.Second)
-
-		// Make the relay unavailable.
-		backend.relays[0].Server.Close()
+		backend.relays[0].Server.Close() // makes the relay unavailable
 
 		path := "/eth/v1/builder/status"
-		rr := backend.request(t, http.MethodGet, path, payloadRegisterValidator)
+		rr := backend.request(t, http.MethodGet, path, nil)
 
 		require.Equal(t, http.StatusServiceUnavailable, rr.Code)
 		require.Equal(t, 0, backend.relays[0].GetRequestCount(path))
@@ -547,18 +547,26 @@ func TestGetPayload(t *testing.T) {
 }
 
 func TestCheckRelays(t *testing.T) {
-	t.Run("At least one relay is okay", func(t *testing.T) {
-		backend := newTestBackend(t, 3, time.Second)
-		status := backend.boost.CheckRelays()
-		require.Equal(t, true, status)
+	t.Run("One relay is okay", func(t *testing.T) {
+		backend := newTestBackend(t, 1, time.Second)
+		numHealthyRelays := backend.boost.CheckRelays()
+		require.Equal(t, 1, numHealthyRelays)
 	})
 
-	t.Run("Every relays are down", func(t *testing.T) {
+	t.Run("One relay is down", func(t *testing.T) {
 		backend := newTestBackend(t, 1, time.Second)
 		backend.relays[0].Server.Close()
 
-		status := backend.boost.CheckRelays()
-		require.Equal(t, false, status)
+		numHealthyRelays := backend.boost.CheckRelays()
+		require.Equal(t, 0, numHealthyRelays)
+	})
+
+	t.Run("One relays is up, one down", func(t *testing.T) {
+		backend := newTestBackend(t, 2, time.Second)
+		backend.relays[0].Server.Close()
+
+		numHealthyRelays := backend.boost.CheckRelays()
+		require.Equal(t, 1, numHealthyRelays)
 	})
 
 	t.Run("Should not follow redirects", func(t *testing.T) {
@@ -571,8 +579,8 @@ func TestCheckRelays(t *testing.T) {
 		url, err := url.ParseRequestURI(backend.relays[0].Server.URL)
 		require.NoError(t, err)
 		backend.boost.relays[0].URL = url
-		status := backend.boost.CheckRelays()
-		require.Equal(t, false, status)
+		numHealthyRelays := backend.boost.CheckRelays()
+		require.Equal(t, 0, numHealthyRelays)
 	})
 }
 
@@ -581,4 +589,40 @@ func TestEmptyTxRoot(t *testing.T) {
 	txroot, _ := transactions.HashTreeRoot()
 	txRootHex := fmt.Sprintf("0x%x", txroot)
 	require.Equal(t, "0x7ffe241ea60187fdb0187bfa22de35d1f9bed7ab061d9401fd47e34a54fbede1", txRootHex)
+}
+
+func TestGetPayloadWithTestdata(t *testing.T) {
+	path := "/eth/v1/builder/blinded_blocks"
+
+	testPayloadsFiles := []string{
+		"../testdata/kiln-signed-blinded-beacon-block-899730.json",
+		"../testdata/signed-blinded-beacon-block-case0.json",
+	}
+
+	for _, fn := range testPayloadsFiles {
+		t.Run(fn, func(t *testing.T) {
+			jsonFile, err := os.Open(fn)
+			require.NoError(t, err)
+			defer jsonFile.Close()
+			signedBlindedBeaconBlock := new(types.SignedBlindedBeaconBlock)
+			require.NoError(t, DecodeJSON(jsonFile, &signedBlindedBeaconBlock))
+
+			backend := newTestBackend(t, 1, time.Second)
+			mockResp := types.GetPayloadResponse{
+				Data: &types.ExecutionPayload{
+					BlockHash: signedBlindedBeaconBlock.Message.Body.ExecutionPayloadHeader.BlockHash,
+				},
+			}
+			backend.relays[0].GetPayloadResponse = &mockResp
+
+			rr := backend.request(t, http.MethodPost, path, signedBlindedBeaconBlock)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			require.Equal(t, 1, backend.relays[0].GetRequestCount(path))
+
+			resp := new(types.GetPayloadResponse)
+			err = json.Unmarshal(rr.Body.Bytes(), resp)
+			require.NoError(t, err)
+			require.Equal(t, signedBlindedBeaconBlock.Message.Body.ExecutionPayloadHeader.BlockHash, resp.Data.BlockHash)
+		})
+	}
 }
