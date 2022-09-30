@@ -42,7 +42,7 @@ func newTestBackend(t *testing.T, numRelays int, relayTimeout time.Duration) *te
 		Relays:                   relayEntries,
 		GenesisForkVersionHex:    "0x00000000",
 		RelayCheck:               true,
-    	RelayMinBid:              types.IntToU256(12345),
+		RelayMinBid:              types.IntToU256(12345),
 		RequestTimeoutGetHeader:  relayTimeout,
 		RequestTimeoutGetPayload: relayTimeout,
 		RequestTimeoutRegVal:     relayTimeout,
@@ -54,7 +54,7 @@ func newTestBackend(t *testing.T, numRelays int, relayTimeout time.Duration) *te
 	return &backend
 }
 
-func (be *testBackend) request(t *testing.T, method string, path string, payload any) *httptest.ResponseRecorder {
+func (be *testBackend) request(t *testing.T, method, path string, payload any) *httptest.ResponseRecorder {
 	var req *http.Request
 	var err error
 
@@ -322,7 +322,6 @@ func TestGetHeader(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, types.IntToU256(12347), resp.Data.Message.Value)
 	})
-
 
 	t.Run("Use header with lowest blockhash if same value", func(t *testing.T) {
 		// Create backend and register 3 relays.

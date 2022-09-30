@@ -31,8 +31,10 @@ var (
 	errServerAlreadyRunning = errors.New("server already running")
 )
 
-var nilHash = types.Hash{}
-var nilResponse = struct{}{}
+var (
+	nilHash     = types.Hash{}
+	nilResponse = struct{}{}
+)
 
 type httpErrorResp struct {
 	Code    int    `json:"code"`
@@ -47,7 +49,7 @@ type BoostServiceOpts struct {
 	RelayMonitors         []*url.URL
 	GenesisForkVersionHex string
 	RelayCheck            bool
-	RelayMinBid			  types.U256Str
+	RelayMinBid           types.U256Str
 
 	RequestTimeoutGetHeader  time.Duration
 	RequestTimeoutGetPayload time.Duration
@@ -62,7 +64,7 @@ type BoostService struct {
 	log           *logrus.Entry
 	srv           *http.Server
 	relayCheck    bool
-  	relayMinBid   types.U256Str
+	relayMinBid   types.U256Str
 
 	builderSigningDomain types.Domain
 	httpClientGetHeader  http.Client
@@ -88,9 +90,9 @@ func NewBoostService(opts BoostServiceOpts) (*BoostService, error) {
 		listenAddr:    opts.ListenAddr,
 		relays:        opts.Relays,
 		relayMonitors: opts.RelayMonitors,
-		log:           opts.Log.WithField("module", "service"),
+		log:           opts.Log,
 		relayCheck:    opts.RelayCheck,
-    	relayMinBid:   opts.RelayMinBid,
+		relayMinBid:   opts.RelayMinBid,
 		bids:          make(map[bidRespKey]bidResp),
 
 		builderSigningDomain: builderSigningDomain,
@@ -188,7 +190,7 @@ func (m *BoostService) sendValidatorRegistrationsToRelayMonitors(payload []types
 		go func(relayMonitor *url.URL) {
 			url := GetURI(relayMonitor, pathRegisterValidator)
 			log = log.WithField("url", url)
-			_, err := SendHTTPRequest(context.Background(), m.httpClientRegVal, http.MethodPost, url, UserAgent(""), payload, nil)
+			_, err := SendHTTPRequest(context.Background(), m.httpClientRegVal, http.MethodPost, url, "", payload, nil)
 			if err != nil {
 				log.WithError(err).Warn("error calling registerValidator on relay monitor")
 				return
@@ -269,7 +271,6 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 		"slot":       slot,
 		"parentHash": parentHashHex,
 		"pubkey":     pubkey,
-		"version":    config.Version,
 	})
 	log.Debug("getHeader")
 
@@ -371,7 +372,7 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 			// Skip if value (fee) is lower than the minimum bid
 			if responsePayload.Data.Message.Value.Cmp(&m.relayMinBid) == -1 {
 				return
-      			}
+			}
 
 			// Compare the bid with already known top bid (if any)
 			if result.response.Data != nil {
@@ -424,11 +425,7 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 }
 
 func (m *BoostService) handleGetPayload(w http.ResponseWriter, req *http.Request) {
-	log := m.log.WithFields(logrus.Fields{
-		"method":  "getPayload",
-		"version": config.Version,
-	})
-
+	log := m.log.WithField("method", "getPayload")
 	log.Debug("getPayload")
 
 	// Read the body first, so we can log it later on error
@@ -494,9 +491,12 @@ func (m *BoostService) handleGetPayload(w http.ResponseWriter, req *http.Request
 
 			responsePayload := new(types.GetPayloadResponse)
 			_, err := SendHTTPRequest(requestCtx, m.httpClientGetPayload, http.MethodPost, url, ua, payload, responsePayload)
-
 			if err != nil {
-				log.WithError(err).Error("error making request to relay")
+				if errors.Is(requestCtx.Err(), context.Canceled) {
+					log.Info("request was cancelled") // this is expected, if payload has already been received by another relay
+				} else {
+					log.WithError(err).Error("error making request to relay")
+				}
 				return
 			}
 
