@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"math/big"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -232,18 +231,6 @@ func getEnvFloat64(key string, defaultValue float64) float64 {
 	return defaultValue
 }
 
-func parseRelayURLs(relayURLs string) []server.RelayEntry {
-	ret := []server.RelayEntry{}
-	for _, entry := range strings.Split(relayURLs, ",") {
-		relay, err := server.NewRelayEntry(entry)
-		if err != nil {
-			log.WithError(err).WithField("relayURL", entry).Fatal("Invalid relay URL")
-		}
-		ret = append(ret, relay)
-	}
-	return ret
-}
-
 func floatEthTo256Wei(val float64) (*types.U256Str, error) {
 	bigval := new(big.Float)
 	bigval.SetFloat64(val)
@@ -260,19 +247,4 @@ func floatEthTo256Wei(val float64) (*types.U256Str, error) {
 	err := u256.FromBig(result)
 
 	return u256, err
-}
-
-func parseRelayMonitorURLs(relayMonitorURLs string) (ret []*url.URL) {
-	for _, entry := range strings.Split(relayMonitorURLs, ",") {
-		if strings.TrimSpace(entry) == "" {
-			continue
-		}
-
-		relayMonitor, err := url.Parse(entry)
-		if err != nil {
-			log.WithError(err).WithField("relayMonitorURL", entry).Fatal("Invalid relay monitor URL")
-		}
-		ret = append(ret, relayMonitor)
-	}
-	return ret
 }

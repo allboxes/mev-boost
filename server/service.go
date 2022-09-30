@@ -151,7 +151,7 @@ func (m *BoostService) StartHTTPServer() error {
 	}
 
 	go m.startBidCacheCleanupTask()
-	
+
 	m.srv = &http.Server{
 		Addr:    m.listenAddr,
 		Handler: m.getRouter(),
