@@ -36,10 +36,56 @@ func newTestBackend(t *testing.T, numRelays int, relayTimeout time.Duration) *te
 		relayEntries[i] = backend.relays[i].RelayEntry
 	}
 
+	censoringRelays := make([]RelayEntry, 1)
+
 	opts := BoostServiceOpts{
 		Log:                      testLog,
 		ListenAddr:               "localhost:12345",
 		Relays:                   relayEntries,
+		CensoringRelays:          censoringRelays,
+		CensorshipPenaltyWei:     types.IntToU256(1),
+		GenesisForkVersionHex:    "0x00000000",
+		RelayCheck:               true,
+		RelayMinBid:              types.IntToU256(12345),
+		RequestTimeoutGetHeader:  relayTimeout,
+		RequestTimeoutGetPayload: relayTimeout,
+		RequestTimeoutRegVal:     relayTimeout,
+	}
+	service, err := NewBoostService(opts)
+	require.NoError(t, err)
+
+	backend.boost = service
+	return &backend
+}
+
+func newCensorshipTestBackend(t *testing.T, numRelays int, relayTimeout time.Duration, penalty uint64, relaysToCensor []int) *testBackend {
+	backend := testBackend{
+		relays: make([]*mockRelay, numRelays),
+	}
+
+	relayEntries := make([]RelayEntry, numRelays)
+	for i := 0; i < numRelays; i++ {
+		// Create a mock relay
+		backend.relays[i] = newMockRelay(t)
+		relayEntries[i] = backend.relays[i].RelayEntry
+	}
+
+	censoringRelays := make([]RelayEntry, len(relaysToCensor))
+	for i := 0; i < len(relaysToCensor); i++ {
+		// Create a censoring relay entry
+		censoringRelays[i] = relayEntries[relaysToCensor[i]]
+	}
+	//censoringRelays[0] = relayEntries[0]
+	//if numRelays > 2 {}
+	//censoringRelays[1] = relayEntries[numRelays-1]
+	//}
+
+	opts := BoostServiceOpts{
+		Log:                      testLog,
+		ListenAddr:               "localhost:12345",
+		Relays:                   relayEntries,
+		CensoringRelays:          censoringRelays,
+		CensorshipPenaltyWei:     types.IntToU256(penalty),
 		GenesisForkVersionHex:    "0x00000000",
 		RelayCheck:               true,
 		RelayMinBid:              types.IntToU256(12345),
@@ -74,7 +120,7 @@ func (be *testBackend) request(t *testing.T, method, path string, payload any) *
 
 func TestNewBoostServiceErrors(t *testing.T) {
 	t.Run("errors when no relays", func(t *testing.T) {
-		_, err := NewBoostService(BoostServiceOpts{testLog, ":123", []RelayEntry{}, []*url.URL{}, "0x00000000", true, types.IntToU256(0), time.Second, time.Second, time.Second})
+		_, err := NewBoostService(BoostServiceOpts{testLog, ":123", []RelayEntry{}, []RelayEntry{}, types.IntToU256(0), []*url.URL{}, "0x00000000", true, types.IntToU256(0), time.Second, time.Second, time.Second})
 		require.Error(t, err)
 	})
 }
@@ -358,12 +404,292 @@ func TestGetHeader(t *testing.T) {
 
 		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-		// Highest value should be 12347, i.e. second relay.
+		// Highest value should be 12345, i.e. second relay.
 		resp := new(types.GetHeaderResponse)
 		err := json.Unmarshal(rr.Body.Bytes(), resp)
 		require.NoError(t, err)
 		require.Equal(t, types.IntToU256(12345), resp.Data.Message.Value)
 		require.Equal(t, "0xa18385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7", resp.Data.Message.Header.BlockHash.String())
+	})
+
+	t.Run("Use uncensoring relay when all are equal", func(t *testing.T) {
+		// Create backend and register 3 relays.
+		backend := newCensorshipTestBackend(t, 3, time.Second, 1, []int{0, 2})
+
+		backend.relays[0].GetHeaderResponse = backend.relays[0].MakeGetHeaderResponse(
+			12345,
+			"0xa38385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		backend.relays[1].GetHeaderResponse = backend.relays[1].MakeGetHeaderResponse(
+			12345,
+			"0xa28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		backend.relays[2].GetHeaderResponse = backend.relays[2].MakeGetHeaderResponse(
+			12345,
+			"0xa18385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		// Run the request.
+		rr := backend.request(t, http.MethodGet, path, nil)
+
+		// Each relay must have received the request.
+		require.Equal(t, 1, backend.relays[0].GetRequestCount(path))
+		require.Equal(t, 1, backend.relays[1].GetRequestCount(path))
+		require.Equal(t, 1, backend.relays[2].GetRequestCount(path))
+
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		// Highest value should be 12345, i.e. second relay.
+		resp := new(types.GetHeaderResponse)
+		err := json.Unmarshal(rr.Body.Bytes(), resp)
+		require.NoError(t, err)
+		require.Equal(t, types.IntToU256(12345), resp.Data.Message.Value)
+		require.Equal(t, "0xa28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7", resp.Data.Message.Header.BlockHash.String())
+	})
+
+	t.Run("Use uncensoring relay when its bid is lower", func(t *testing.T) {
+		// Create backend and register 3 relays.
+		backend := newCensorshipTestBackend(t, 3, time.Second, 10, []int{0, 2})
+
+		backend.relays[0].GetHeaderResponse = backend.relays[0].MakeGetHeaderResponse(
+			12355,
+			"0xa38385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		backend.relays[1].GetHeaderResponse = backend.relays[1].MakeGetHeaderResponse(
+			12350,
+			"0xa28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		backend.relays[2].GetHeaderResponse = backend.relays[2].MakeGetHeaderResponse(
+			12352,
+			"0xa18385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		// Run the request.
+		rr := backend.request(t, http.MethodGet, path, nil)
+
+		// Each relay must have received the request.
+		require.Equal(t, 1, backend.relays[0].GetRequestCount(path))
+		require.Equal(t, 1, backend.relays[1].GetRequestCount(path))
+		require.Equal(t, 1, backend.relays[2].GetRequestCount(path))
+
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		// Highest value should be 12350, i.e. second relay.
+		resp := new(types.GetHeaderResponse)
+		err := json.Unmarshal(rr.Body.Bytes(), resp)
+		require.NoError(t, err)
+		require.Equal(t, types.IntToU256(12350), resp.Data.Message.Value)
+		require.Equal(t, "0xa28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7", resp.Data.Message.Header.BlockHash.String())
+	})
+
+	t.Run("Use uncensoring relay when its bid is lower", func(t *testing.T) {
+		// Create backend and register 3 relays.
+		backend := newCensorshipTestBackend(t, 3, time.Second, 10, []int{0})
+
+		backend.relays[0].GetHeaderResponse = backend.relays[0].MakeGetHeaderResponse(
+			12355,
+			"0xa38385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		backend.relays[1].GetHeaderResponse = backend.relays[1].MakeGetHeaderResponse(
+			12350,
+			"0xa28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		backend.relays[2].GetHeaderResponse = backend.relays[2].MakeGetHeaderResponse(
+			12352,
+			"0xa18385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		// Run the request.
+		rr := backend.request(t, http.MethodGet, path, nil)
+
+		// Each relay must have received the request.
+		require.Equal(t, 1, backend.relays[0].GetRequestCount(path))
+		require.Equal(t, 1, backend.relays[1].GetRequestCount(path))
+		require.Equal(t, 1, backend.relays[2].GetRequestCount(path))
+
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		resp := new(types.GetHeaderResponse)
+		err := json.Unmarshal(rr.Body.Bytes(), resp)
+		require.NoError(t, err)
+		require.Equal(t, types.IntToU256(12352), resp.Data.Message.Value)
+		require.Equal(t, "0xa18385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7", resp.Data.Message.Header.BlockHash.String())
+	})
+
+	t.Run("Use uncensoring relay when only first relay censors", func(t *testing.T) {
+		// Create backend and register 3 relays.
+		backend := newCensorshipTestBackend(t, 2, time.Second, 10, []int{0})
+
+		backend.relays[0].GetHeaderResponse = backend.relays[0].MakeGetHeaderResponse(
+			12355,
+			"0xa38385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		backend.relays[1].GetHeaderResponse = backend.relays[1].MakeGetHeaderResponse(
+			12350,
+			"0xa28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		// Run the request.
+		rr := backend.request(t, http.MethodGet, path, nil)
+
+		// Each relay must have received the request.
+		require.Equal(t, 1, backend.relays[0].GetRequestCount(path))
+		require.Equal(t, 1, backend.relays[1].GetRequestCount(path))
+
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		resp := new(types.GetHeaderResponse)
+		err := json.Unmarshal(rr.Body.Bytes(), resp)
+		require.NoError(t, err)
+		require.Equal(t, types.IntToU256(12350), resp.Data.Message.Value)
+		require.Equal(t, "0xa28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7", resp.Data.Message.Header.BlockHash.String())
+	})
+
+	t.Run("Use uncensoring relay when only second relay censors", func(t *testing.T) {
+		// Create backend and register 3 relays.
+		backend := newCensorshipTestBackend(t, 2, time.Second, 10, []int{1})
+
+		backend.relays[0].GetHeaderResponse = backend.relays[0].MakeGetHeaderResponse(
+			12360,
+			"0xa38385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		backend.relays[1].GetHeaderResponse = backend.relays[1].MakeGetHeaderResponse(
+			12365,
+			"0xa28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		// Run the request.
+		rr := backend.request(t, http.MethodGet, path, nil)
+
+		// Each relay must have received the request.
+		require.Equal(t, 1, backend.relays[0].GetRequestCount(path))
+		require.Equal(t, 1, backend.relays[1].GetRequestCount(path))
+
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		resp := new(types.GetHeaderResponse)
+		err := json.Unmarshal(rr.Body.Bytes(), resp)
+		require.NoError(t, err)
+		require.Equal(t, types.IntToU256(12360), resp.Data.Message.Value)
+		require.Equal(t, "0xa38385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7", resp.Data.Message.Header.BlockHash.String())
+	})
+
+	t.Run("Use censoring relay when its bid is higher", func(t *testing.T) {
+		// Create backend and register 3 relays.
+		backend := newCensorshipTestBackend(t, 3, time.Second, 10, []int{0, 2})
+
+		backend.relays[0].GetHeaderResponse = backend.relays[0].MakeGetHeaderResponse(
+			12355,
+			"0xa38385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		backend.relays[1].GetHeaderResponse = backend.relays[1].MakeGetHeaderResponse(
+			12350,
+			"0xa28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		backend.relays[2].GetHeaderResponse = backend.relays[2].MakeGetHeaderResponse(
+			12361,
+			"0xa18385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		// Run the request.
+		rr := backend.request(t, http.MethodGet, path, nil)
+
+		// Each relay must have received the request.
+		require.Equal(t, 1, backend.relays[0].GetRequestCount(path))
+		require.Equal(t, 1, backend.relays[1].GetRequestCount(path))
+		require.Equal(t, 1, backend.relays[2].GetRequestCount(path))
+
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		resp := new(types.GetHeaderResponse)
+		err := json.Unmarshal(rr.Body.Bytes(), resp)
+		require.NoError(t, err)
+		require.Equal(t, types.IntToU256(12361), resp.Data.Message.Value)
+		require.Equal(t, "0xa18385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7", resp.Data.Message.Header.BlockHash.String())
+	})
+
+	t.Run("Use middle censoring relay when its bid is higher", func(t *testing.T) {
+		// Create backend and register 3 relays.
+		backend := newCensorshipTestBackend(t, 3, time.Second, 10, []int{1})
+
+		backend.relays[0].GetHeaderResponse = backend.relays[0].MakeGetHeaderResponse(
+			12355,
+			"0xa38385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		backend.relays[1].GetHeaderResponse = backend.relays[1].MakeGetHeaderResponse(
+			12372,
+			"0xa28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		backend.relays[2].GetHeaderResponse = backend.relays[2].MakeGetHeaderResponse(
+			12361,
+			"0xa18385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		// Run the request.
+		rr := backend.request(t, http.MethodGet, path, nil)
+
+		// Each relay must have received the request.
+		require.Equal(t, 1, backend.relays[0].GetRequestCount(path))
+		require.Equal(t, 1, backend.relays[1].GetRequestCount(path))
+		require.Equal(t, 1, backend.relays[2].GetRequestCount(path))
+
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		resp := new(types.GetHeaderResponse)
+		err := json.Unmarshal(rr.Body.Bytes(), resp)
+		require.NoError(t, err)
+		require.Equal(t, types.IntToU256(12372), resp.Data.Message.Value)
+		require.Equal(t, "0xa28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7", resp.Data.Message.Header.BlockHash.String())
 	})
 
 	t.Run("Respect minimum bid cutoff", func(t *testing.T) {
@@ -385,6 +711,28 @@ func TestGetHeader(t *testing.T) {
 		require.Equal(t, 1, backend.relays[0].GetRequestCount(path))
 
 		// Request should have no content (min bid is 12345)
+		require.Equal(t, http.StatusNoContent, rr.Code)
+	})
+
+	t.Run("Ignore censored bid below penalty amount", func(t *testing.T) {
+		// Create backend and register relay.
+		backend := newCensorshipTestBackend(t, 1, time.Second, 12356, []int{0})
+
+		// Relay will return signed response with value 12344.
+		backend.relays[0].GetHeaderResponse = backend.relays[0].MakeGetHeaderResponse(
+			12355,
+			"0xa28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0xe28385e7bd68df656cd0042b74b69c3104b5356ed1f20eb69f1f925df47a3ab7",
+			"0x8a1d7b8dd64e0aafe7ea7b6c95065c9364cf99d38470c12ee807d55f7de1529ad29ce2c422e0b65e3d5a05c02caca249",
+		)
+
+		// Run the request.
+		rr := backend.request(t, http.MethodGet, path, nil)
+
+		// Each relay must have received the request.
+		require.Equal(t, 1, backend.relays[0].GetRequestCount(path))
+
+		// Request should have no content
 		require.Equal(t, http.StatusNoContent, rr.Code)
 	})
 

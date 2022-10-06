@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -46,6 +47,8 @@ type BoostServiceOpts struct {
 	Log                   *logrus.Entry
 	ListenAddr            string
 	Relays                []RelayEntry
+	CensoringRelays       []RelayEntry
+	CensorshipPenaltyWei  types.U256Str
 	RelayMonitors         []*url.URL
 	GenesisForkVersionHex string
 	RelayCheck            bool
@@ -58,13 +61,15 @@ type BoostServiceOpts struct {
 
 // BoostService - the mev-boost service
 type BoostService struct {
-	listenAddr    string
-	relays        []RelayEntry
-	relayMonitors []*url.URL
-	log           *logrus.Entry
-	srv           *http.Server
-	relayCheck    bool
-	relayMinBid   types.U256Str
+	listenAddr           string
+	relays               []RelayEntry
+	censoringRelays      []RelayEntry
+	censorshipPenaltyWei types.U256Str
+	relayMonitors        []*url.URL
+	log                  *logrus.Entry
+	srv                  *http.Server
+	relayCheck           bool
+	relayMinBid          types.U256Str
 
 	builderSigningDomain types.Domain
 	httpClientGetHeader  http.Client
@@ -87,13 +92,15 @@ func NewBoostService(opts BoostServiceOpts) (*BoostService, error) {
 	}
 
 	return &BoostService{
-		listenAddr:    opts.ListenAddr,
-		relays:        opts.Relays,
-		relayMonitors: opts.RelayMonitors,
-		log:           opts.Log,
-		relayCheck:    opts.RelayCheck,
-		relayMinBid:   opts.RelayMinBid,
-		bids:          make(map[bidRespKey]bidResp),
+		listenAddr:           opts.ListenAddr,
+		relays:               opts.Relays,
+		censoringRelays:      opts.CensoringRelays,
+		censorshipPenaltyWei: opts.CensorshipPenaltyWei,
+		relayMonitors:        opts.RelayMonitors,
+		log:                  opts.Log,
+		relayCheck:           opts.RelayCheck,
+		relayMinBid:          opts.RelayMinBid,
+		bids:                 make(map[bidRespKey]bidResp),
 
 		builderSigningDomain: builderSigningDomain,
 		httpClientGetHeader: http.Client{
@@ -300,6 +307,13 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 		wg.Add(1)
 		go func(relay RelayEntry) {
 			defer wg.Done()
+
+			var isCensoring bool
+			if len(m.censoringRelays) > 0 {
+				isCensoring = IsCensoring(m, m.censoringRelays, relay)
+			} else {
+				isCensoring = false
+			}
 			path := fmt.Sprintf("/eth/v1/builder/header/%s/%s/%s", slot, parentHashHex, pubkey)
 			url := relay.GetURI(path)
 			log := log.WithField("url", url)
@@ -309,6 +323,8 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 				log.WithError(err).Warn("error making request to relay")
 				return
 			}
+
+			log.Debug("bid from censored relay:", isCensoring)
 
 			if code == http.StatusNoContent {
 				log.Debug("no-content response")
@@ -361,6 +377,11 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 				return
 			}
 
+			if isCensoring && responsePayload.Data.Message.Value.Cmp(&m.censorshipPenaltyWei) == -1 {
+				log.Warn("ignoring censoring relay with bid below penalty amount")
+				return
+			}
+
 			log.Debug("bid received")
 
 			mu.Lock()
@@ -373,10 +394,16 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 			if responsePayload.Data.Message.Value.Cmp(&m.relayMinBid) == -1 {
 				return
 			}
-
 			// Compare the bid with already known top bid (if any)
 			if result.response.Data != nil {
-				valueDiff := responsePayload.Data.Message.Value.Cmp(&result.response.Data.Message.Value)
+
+				adjustedPriorBid, err := ApplyCensorshipPenalty(isCensoring, &m.censorshipPenaltyWei, relay, result)
+				if err != nil {
+					log.WithError(err).Error("error applying censorship penalty")
+					return
+				}
+
+				valueDiff := responsePayload.Data.Message.Value.Cmp(adjustedPriorBid)
 				if valueDiff == -1 { // current bid is less profitable than already known one
 					return
 				} else if valueDiff == 0 { // current bid is equally profitable as already known one. Use hash as tiebreaker
@@ -391,6 +418,7 @@ func (m *BoostService) handleGetHeader(w http.ResponseWriter, req *http.Request)
 			log.Debug("new best bid")
 			result.response = *responsePayload
 			result.blockHash = blockHash
+			result.isCensoring = isCensoring
 			result.t = time.Now()
 		}(relay)
 	}
@@ -554,7 +582,6 @@ func (m *BoostService) CheckRelays() int {
 			defer wg.Done()
 			url := relay.GetURI(pathStatus)
 			log := m.log.WithField("url", url)
-			log.Debug("checking relay status")
 
 			code, err := SendHTTPRequest(context.Background(), m.httpClientGetHeader, http.MethodGet, url, "", nil, nil)
 			if err != nil {
@@ -576,4 +603,47 @@ func (m *BoostService) CheckRelays() int {
 	// At the end, wait for every routine and return status according to relay's ones.
 	wg.Wait()
 	return int(numSuccessRequestsToRelay)
+}
+
+// ApplyCensorshipPenalty adjusts prior bids by penalty amount when comparing against latest bid
+func ApplyCensorshipPenalty(isCensoring bool, penalty *types.U256Str, relay RelayEntry, priorBid bidResp) (*types.U256Str, error) {
+	result := new(big.Int)
+
+	if isCensoring {
+		// if new bid and old bid are censoring, just return original value
+		if priorBid.isCensoring {
+			return &priorBid.response.Data.Message.Value, nil
+		}
+
+		// if only new bid is censoring add penalty amount to old (non-censoring) value
+		result.Add(penalty.BigInt(), priorBid.response.Data.Message.Value.BigInt())
+		u256 := new(types.U256Str)
+		err := u256.FromBig(result)
+		return u256, err
+	}
+
+	// if only old bid was censoring subtract penalty from it
+	if priorBid.isCensoring {
+		result.Sub(priorBid.response.Data.Message.Value.BigInt(), penalty.BigInt())
+		u256 := new(types.U256Str)
+		err := u256.FromBig(result)
+		return u256, err
+	}
+
+	// if neither relay censored just return original value
+	return &priorBid.response.Data.Message.Value, nil
+}
+
+// IsCensoring checks if relay is in the censorship list
+func IsCensoring(m *BoostService, sl []RelayEntry, relay RelayEntry) bool {
+	for _, censoringRelay := range sl {
+		if censoringRelay.URL == nil {
+			m.log.Debug("Empty Relay URL", censoringRelay)
+			continue
+		}
+		if censoringRelay.String() == relay.String() {
+			return true
+		}
+	}
+	return false
 }

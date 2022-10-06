@@ -29,6 +29,7 @@ var (
 	defaultRelayCheck         = os.Getenv("RELAY_STARTUP_CHECK") != ""
 	defaultGenesisForkVersion = getEnv("GENESIS_FORK_VERSION", "")
 	defaultRelayMinBidEth     = getEnvFloat64("RELAY_MIN_BID", 0.001)
+	defaultPenaltyEth         = getEnvFloat64("CENSORSHIP_PENALTY", .01)
 	defaultDisableLogVersion  = os.Getenv("DISABLE_LOG_VERSION") == "1" // disables adding the version to every log entry
 
 	// mev-boost relay request timeouts (see also https://github.com/flashbots/mev-boost/issues/287)
@@ -36,8 +37,9 @@ var (
 	defaultTimeoutMsGetPayload        = getEnvInt("RELAY_TIMEOUT_MS_GETPAYLOAD", 4000) // timeout for getPayload requests
 	defaultTimeoutMsRegisterValidator = getEnvInt("RELAY_TIMEOUT_MS_REGVAL", 3000)     // timeout for registerValidator requests
 
-	relays        relayList
-	relayMonitors relayMonitorList
+	relays          relayList
+	censoringRelays relayList
+	relayMonitors   relayMonitorList
 
 	// cli flags
 	printVersion = flag.Bool("version", false, "only print version")
@@ -47,11 +49,13 @@ var (
 	logService   = flag.String("log-service", "", "add a 'service=...' tag to all log messages")
 	logNoVersion = flag.Bool("log-no-version", defaultDisableLogVersion, "disables adding the version to every log entry")
 
-	listenAddr       = flag.String("addr", defaultListenAddr, "listen-address for mev-boost server")
-	relayURLs        = flag.String("relays", "", "relay urls - single entry or comma-separated list (scheme://pubkey@host)")
-	relayCheck       = flag.Bool("relay-check", defaultRelayCheck, "check relay status on startup and on the status API call")
-	relayMinBidEth 	 = flag.Float64("min-bid", defaultRelayMinBidEth, "minimum bid to accept from a relay [eth]")
-	relayMonitorURLs = flag.String("relay-monitors", "", "relay monitor urls - single entry or comma-separated list (scheme://host)")
+	listenAddr           = flag.String("addr", defaultListenAddr, "listen-address for mev-boost server")
+	relayURLs            = flag.String("relays", "", "relay urls - single entry or comma-separated list (scheme://pubkey@host)")
+	censoringRelayURLs   = flag.String("censoring-relays", "", "relay urls - single entry or comma-separated list (scheme://pubkey@host)")
+	censorshipPenaltyEth = flag.Float64("censorship-penalty", defaultPenaltyEth, "penalty to apply to censoring relays when comparing bids [eth]")
+	relayCheck           = flag.Bool("relay-check", defaultRelayCheck, "check relay status on startup and on the status API call")
+	relayMinBidEth       = flag.Float64("min-bid", defaultRelayMinBidEth, "minimum bid to accept from a relay [eth]")
+	relayMonitorURLs     = flag.String("relay-monitors", "", "relay monitor urls - single entry or comma-separated list (scheme://host)")
 
 	relayTimeoutMsGetHeader  = flag.Int("request-timeout-getheader", defaultTimeoutMsGetHeader, "timeout for getHeader requests to the relay [ms]")
 	relayTimeoutMsGetPayload = flag.Int("request-timeout-getpayload", defaultTimeoutMsGetPayload, "timeout for getPayload requests to the relay [ms]")
@@ -140,13 +144,31 @@ func Main() {
 		}
 	}
 
+	if *censoringRelayURLs != "" {
+		for _, relayURL := range strings.Split(*censoringRelayURLs, ",") {
+			err := censoringRelays.Set(strings.TrimSpace(relayURL))
+			if err != nil {
+				log.WithError(err).WithField("relay", relayURL).Fatal("Invalid censoring relay URL")
+			}
+			err2 := relays.Set(strings.TrimSpace(relayURL))
+			if err2 == errDuplicateEntry {
+				log.Warn("relay declared as both censoring and standard relay ", relayURL)
+			} else if err2 != nil {
+				log.WithError(err).WithField("relay", relayURL).Fatal("Invalid censoring relay URL")
+			}
+		}
+	}
+
 	if len(relays) == 0 {
 		flag.Usage()
 		log.Fatal("no relays specified")
 	}
 	log.Infof("using %d relays", len(relays))
+	if *censorshipPenaltyEth != float64(0.0) {
+		log.Infof("censorship penalty: %v eth", *censorshipPenaltyEth)
+	}
 	for index, relay := range relays {
-		log.Infof("relay #%d: %s", index+1, relay.String())
+		log.Infof("relay #%d: %s penalized: %t", index+1, relay.String(), censoringRelays.Contains(relay))
 	}
 
 	// For backwards compatibility with the -relay-monitors flag.
@@ -173,16 +195,34 @@ func Main() {
 	if *relayMinBidEth > 1000000.0 {
 		log.Fatal("Minimum bid is too large, please ensure min-bid is denominated in Ethers")
 	}
+	if *relayMinBidEth != float64(0.0) {
+		log.Infof("minimum bid: %v eth", *relayMinBidEth)
+	}
 
 	relayMinBidWei, err := floatEthTo256Wei(*relayMinBidEth)
 	if err != nil {
 		log.WithError(err).Fatal("failed converting min bid")
 	}
 
+	if *censorshipPenaltyEth < 0.0 {
+		log.Fatal("Please specify a non-negative censorship penalty")
+	}
+
+	if *censorshipPenaltyEth > 1000000.0 {
+		log.Fatal("Minimum bid is too large, please ensure censorship penalty is denominated in Ethers")
+	}
+
+	censorshipPenaltyWei, err := floatEthTo256Wei(*censorshipPenaltyEth)
+	if err != nil {
+		log.WithError(err).Fatal("failed converting penalty")
+	}
+
 	opts := server.BoostServiceOpts{
 		Log:                      log,
 		ListenAddr:               *listenAddr,
 		Relays:                   relays,
+		CensoringRelays:          censoringRelays,
+		CensorshipPenaltyWei:     *censorshipPenaltyWei,
 		RelayMonitors:            relayMonitors,
 		GenesisForkVersionHex:    genesisForkVersionHex,
 		RelayCheck:               *relayCheck,
